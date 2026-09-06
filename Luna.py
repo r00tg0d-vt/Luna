@@ -1,10 +1,9 @@
+```python
+import streamlit as st
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
-import os
-import sys
-import re
-import time
+
 
 # ============================================================
 # CONFIG
@@ -25,511 +24,649 @@ HEADERS = {
 SCAN_DAYS = 180
 BLOCK_SIZE = 30
 
-# ============================================================
-# COMMAND LINE SEARCH
-# ============================================================
-
-check_time = None
-
-if len(sys.argv) >= 3 and sys.argv[1].lower() == "!check":
-
-    raw_time = " ".join(sys.argv[2:]).strip().lower()
-
-    # Accept:
-    # 6am
-    # 6 am
-    # 6:00am
-    # 6:00 am
-    # 06:00
-    match = re.fullmatch(
-        r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
-        raw_time
-    )
-
-    if not match:
-        print()
-        print("❌ Invalid time.")
-        print()
-        print("Examples:")
-        print("   python dogg.py !check 6am")
-        print("   python dogg.py !check 6:30pm")
-        print("   python dogg.py !check 14:00")
-        print()
-        sys.exit(1)
-
-    hour = int(match.group(1))
-    minute = int(match.group(2) or 0)
-    meridiem = match.group(3)
-
-    if meridiem:
-
-        if hour < 1 or hour > 12 or minute > 59:
-            print("❌ Invalid time.")
-            sys.exit(1)
-
-        if meridiem == "am":
-            hour = 0 if hour == 12 else hour
-        else:
-            hour = 12 if hour == 12 else hour + 12
-
-    else:
-
-        if hour > 23 or minute > 59:
-            print("❌ Invalid time.")
-            sys.exit(1)
-
-    check_time = f"{hour:02d}:{minute:02d}"
 
 # ============================================================
-# TERMINAL STYLING
+# PAGE CONFIG
 # ============================================================
 
-RESET = "\033[0m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
-
-GREEN = "\033[92m"
-CYAN = "\033[96m"
-YELLOW = "\033[93m"
-RED = "\033[91m"
-WHITE = "\033[97m"
-GRAY = "\033[90m"
-MAGENTA = "\033[95m"
+st.set_page_config(
+    page_title="Fairchildes Paw Park",
+    page_icon="🐾",
+    layout="wide",
+)
 
 
-def clear_screen():
-    os.system("cls" if os.name == "nt" else "clear")
+# ============================================================
+# CUSTOM CSS
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+        .main-title {
+            font-size: 2.2rem;
+            font-weight: 700;
+            margin-bottom: 0;
+        }
+
+        .subtitle {
+            font-size: 1.2rem;
+            opacity: 0.75;
+            margin-top: 0;
+        }
+
+        .slot-card {
+            padding: 18px;
+            border: 1px solid rgba(128, 128, 128, 0.25);
+            border-radius: 12px;
+            margin-bottom: 14px;
+        }
+
+        .date-title {
+            font-size: 1.15rem;
+            font-weight: 700;
+        }
+
+        .times {
+            font-size: 1rem;
+            margin-top: 8px;
+        }
+
+        .price {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-top: 8px;
+        }
+
+        .summary-card {
+            padding: 18px;
+            border: 1px solid rgba(128, 128, 128, 0.25);
+            border-radius: 12px;
+            text-align: center;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
-def line(char="─", length=68):
-    return char * length
+# ============================================================
+# SESSION STATE
+# ============================================================
 
+if "days" not in st.session_state:
+    st.session_state.days = []
 
-def box_top():
-    print(f"{GRAY}╭{line('─')}╮{RESET}")
+if "failed_blocks" not in st.session_state:
+    st.session_state.failed_blocks = 0
 
-
-def box_bottom():
-    print(f"{GRAY}╰{line('─')}╯{RESET}")
-
-
-def box_line(text=""):
-    print(f"{GRAY}│{RESET} {text}")
+if "scanned" not in st.session_state:
+    st.session_state.scanned = False
 
 
 # ============================================================
 # HEADER
 # ============================================================
 
-clear_screen()
-
-print()
-box_top()
-
-box_line(
-    f"{GREEN}{BOLD}🐾  FAIRCHILDES PAW PARK{RESET}"
+st.markdown(
+    '<div class="main-title">🐾 Fairchildes Paw Park</div>',
+    unsafe_allow_html=True,
 )
 
-box_line(
-    f"{CYAN}{BOLD}    AVAILABILITY SCANNER{RESET}"
+st.markdown(
+    '<div class="subtitle">Availability Scanner</div>',
+    unsafe_allow_html=True,
 )
 
-box_line()
-
-box_line(
-    f"{DIM}    Scanning the next {SCAN_DAYS} days{RESET}"
+st.write(
+    f"Scanning the next **{SCAN_DAYS} days** · "
+    f"Timezone: **{TIMEZONE}**"
 )
 
-box_line(
-    f"{DIM}    Location: Europe/London{RESET}"
-)
-
-box_bottom()
-
-print()
+st.divider()
 
 
 # ============================================================
-# SCAN
+# SCAN FUNCTION
 # ============================================================
 
-all_days = []
-failed_blocks = 0
+def scan_availability(progress_bar, status_text):
+    """
+    Scan the Appointo availability API in blocks and return
+    all days returned by the API.
+    """
 
-total_blocks = (SCAN_DAYS + BLOCK_SIZE - 1) // BLOCK_SIZE
+    all_days = []
+    failed_blocks = 0
 
-print(f"{GRAY}{line()}{RESET}")
-print(
-    f"{BOLD}{WHITE}  SCANNING AVAILABILITY{RESET}"
-)
-print(f"{GRAY}{line()}{RESET}")
-print()
+    total_blocks = (
+        SCAN_DAYS + BLOCK_SIZE - 1
+    ) // BLOCK_SIZE
 
-for block_number, i in enumerate(
-    range(0, SCAN_DAYS, BLOCK_SIZE), start=1
-):
+    for block_number, i in enumerate(
+        range(0, SCAN_DAYS, BLOCK_SIZE),
+        start=1,
+    ):
 
-    start = datetime.now() + timedelta(days=i)
-    end = datetime.now() + timedelta(days=i + BLOCK_SIZE)
+        start = datetime.now(
+            ZoneInfo(TIMEZONE)
+        ) + timedelta(days=i)
 
-    start_date = start.strftime("%Y-%m-%d")
-    end_date = end.strftime("%Y-%m-%d")
+        end = datetime.now(
+            ZoneInfo(TIMEZONE)
+        ) + timedelta(days=i + BLOCK_SIZE)
 
-    params = {
-        "start_date": start_date,
-        "end_date": end_date,
-        "shop": SHOP,
-        "duration_uuid": UUID,
-        "timezone": TIMEZONE,
-    }
+        start_date = start.strftime("%Y-%m-%d")
+        end_date = end.strftime("%Y-%m-%d")
 
-    # Progress bar
-    bar_width = 28
-    progress = block_number / total_blocks
-    filled = int(bar_width * progress)
-    bar = "█" * filled + "░" * (bar_width - filled)
+        params = {
+            "start_date": start_date,
+            "end_date": end_date,
+            "shop": SHOP,
+            "duration_uuid": UUID,
+            "timezone": TIMEZONE,
+        }
 
-    print(
-        f"  {CYAN}[{bar}]{RESET} "
-        f"{block_number}/{total_blocks}  "
-        f"{GRAY}{start_date} → {end_date}{RESET}",
-        end="\r",
-        flush=True
-    )
+        progress = block_number / total_blocks
 
-    try:
-        response = requests.get(
-            API_URL,
-            params=params,
-            headers=HEADERS,
-            timeout=15
+        progress_bar.progress(progress)
+
+        status_text.write(
+            f"Scanning block **{block_number}/{total_blocks}**  "
+            f"({start_date} → {end_date})"
         )
 
-        response.raise_for_status()
+        try:
+            response = requests.get(
+                API_URL,
+                params=params,
+                headers=HEADERS,
+                timeout=15,
+            )
 
-        data = response.json()
+            response.raise_for_status()
 
-        days = data.get(
-            "calendly_events", {}
-        ).get("days", [])
+            data = response.json()
 
-        all_days.extend(days)
+            days = (
+                data
+                .get("calendly_events", {})
+                .get("days", [])
+            )
 
-    except requests.RequestException as e:
-        failed_blocks += 1
+            all_days.extend(days)
 
-        print(
-            f"\n  {RED}✕ Block {block_number} failed:"
-            f" {e}{RESET}"
-        )
+        except requests.RequestException:
+            failed_blocks += 1
 
-    time.sleep(0.05)
+        # Small delay to avoid hammering the API
+        import time as time_module
+        time_module.sleep(0.05)
 
-
-print("\n")
-print(f"{GREEN}✓ Scan complete{RESET}")
-print()
+    return all_days, failed_blocks
 
 
 # ============================================================
 # REMOVE DUPLICATES
 # ============================================================
 
-unique_days = {}
+def remove_duplicate_days(days):
+    """
+    Remove duplicate dates returned by the API.
+    """
 
-for day in all_days:
-    date = day.get("date")
+    unique_days = {}
 
-    if date:
-        unique_days[date] = day
+    for day in days:
 
-# ============================================================
-# TIME SEARCH
-# ============================================================
-if len(sys.argv) >= 3 and sys.argv[1].lower() == "!check":
-
-    raw_time = " ".join(sys.argv[2:]).strip().lower()
-
-    # Accept: 6am, 6 am, 6:00am, 6:00 am, 06:00
-    match = re.match(r"^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$", raw_time)
-
-    if not match:
-        print("\nInvalid time format. Example: python .\\dogg.py !check 6am")
-        sys.exit(1)
-
-    hour = int(match.group(1))
-    minute = int(match.group(2) or 0)
-    ampm = match.group(3)
-
-    if ampm:
-        if hour < 1 or hour > 12:
-            print("\nInvalid hour.")
-            sys.exit(1)
-
-        if ampm == "am":
-            hour = 0 if hour == 12 else hour
-        else:
-            hour = 12 if hour == 12 else hour + 12
-
-    if hour > 23 or minute > 59:
-        print("\nInvalid time.")
-        sys.exit(1)
-
-    check_time = f"{hour:02d}:{minute:02d}"
-
-    print()
-    print("╔══════════════════════════════════════════════════════════╗")
-    print(f"║  TIME SEARCH: {raw_time.upper():<42}║")
-    print("╚══════════════════════════════════════════════════════════╝")
-    print()
-
-    matches = []
-
-    # Search the actual slot dictionaries collected from the API
-    for day in unique_days.values():
-
-        # Handle the structure used by the scanner
-        if isinstance(day, dict):
-            slots = day.get("spots", [])
-        elif isinstance(day, list):
-            slots = day
-        else:
+        if not isinstance(day, dict):
             continue
 
-        for slot in slots:
+        date = day.get("date")
 
-            if not isinstance(slot, dict):
-                continue
+        if date:
+            unique_days[date] = day
 
-            if slot.get("status") != "available":
-                continue
+    return unique_days
 
-            if slot.get("is_available") is not True:
-                continue
 
-            start_time = slot.get("start_time")
-
-            if not start_time:
-                continue
-
-            dt = datetime.fromisoformat(
-                start_time.replace("Z", "+00:00")
-            )
-
-            local_time = dt.astimezone(ZoneInfo(TIMEZONE))
-
-            if local_time.strftime("%H:%M") == check_time:
-                matches.append((local_time, slot))
-
-    if not matches:
-        print(f"  No availability found at {raw_time.upper()}.")
-    else:
-        # Remove duplicate slots
-        seen = set()
-        unique_matches = []
-
-        for local_time, slot in matches:
-            key = local_time.isoformat()
-
-            if key not in seen:
-                seen.add(key)
-                unique_matches.append((local_time, slot))
-
-        print(f"  Found {len(unique_matches)} matching slot(s):\n")
-
-        for local_time, slot in unique_matches:
-            price = slot.get("price", "N/A")
-
-            print(
-                f"  {local_time.strftime('%A %d %B %Y'):<25}"
-                f"{local_time.strftime('%I:%M %p').lstrip('0'):<10}"
-                f"£{price}"
-            )
-
-    print()
-    sys.exit(0)
 # ============================================================
-# DISPLAY RESULTS
+# GET AVAILABLE SLOTS
 # ============================================================
 
-available_days = 0
-total_slots = 0
+def get_available_slots(day):
+    """
+    Return only slots that are actually available.
+    """
 
-print(f"{GRAY}{line()}{RESET}")
-print(
-    f"{BOLD}{WHITE}  AVAILABLE SLOTS{RESET}"
-)
-print(f"{GRAY}{line()}{RESET}")
-print()
-
-for date_str in sorted(unique_days):
-
-    day = unique_days[date_str]
-
-    if (
-        day.get("status") == "unavailable"
-        and day.get("day_available") is False
-    ):
-        continue
+    if not isinstance(day, dict):
+        return []
 
     spots = day.get("spots", [])
 
-    available = [
+    return [
         spot
         for spot in spots
-        if spot.get("status") == "available"
+        if isinstance(spot, dict)
+        and spot.get("status") == "available"
         and spot.get("is_available") is True
     ]
 
-    if not available:
-        continue
 
-    available_days += 1
-    total_slots += len(available)
+# ============================================================
+# FORMAT TIME
+# ============================================================
 
-    # --------------------------------------------------------
-    # DATE
-    # --------------------------------------------------------
+def format_slot_time(start_time):
+    """
+    Convert API start_time into London time and display it
+    as 6:00 AM / 6:30 PM etc.
+    """
 
-    date_obj = datetime.strptime(
-        date_str,
-        "%Y-%m-%d"
-    )
+    if not start_time:
+        return None
 
-    friendly_date = date_obj.strftime(
-        "%A, %d %B %Y"
-    )
+    try:
 
-    print(
-        f"{CYAN}{BOLD}📅  {friendly_date}{RESET}"
-    )
+        # Handle both ISO strings with and without Z
+        dt = datetime.fromisoformat(
+            start_time.replace("Z", "+00:00")
+        )
 
-    # --------------------------------------------------------
-    # TIME CONVERSION
-    # --------------------------------------------------------
+        london_time = dt.astimezone(
+            ZoneInfo(TIMEZONE)
+        )
 
-    times = []
+        return london_time
 
-    for spot in available:
+    except (ValueError, TypeError):
+        return None
 
-        start_time = spot.get("start_time")
 
-        if not start_time:
-            continue
+# ============================================================
+# FIND SLOTS AT SPECIFIC TIME
+# ============================================================
 
-        try:
-            dt = datetime.fromisoformat(start_time)
+def find_slots_at_time(unique_days, selected_time):
+    """
+    Find available slots matching the selected London time.
+    """
 
-            london_time = dt.astimezone(
-                ZoneInfo(TIMEZONE)
+    matches = []
+
+    target_time = selected_time.strftime("%H:%M")
+
+    for day in unique_days.values():
+
+        slots = get_available_slots(day)
+
+        for slot in slots:
+
+            start_time = slot.get("start_time")
+
+            local_time = format_slot_time(start_time)
+
+            if local_time is None:
+                continue
+
+            if local_time.strftime("%H:%M") == target_time:
+                matches.append(
+                    (local_time, slot)
+                )
+
+    # Remove duplicate slots
+    seen = set()
+    unique_matches = []
+
+    for local_time, slot in matches:
+
+        key = local_time.isoformat()
+
+        if key not in seen:
+
+            seen.add(key)
+
+            unique_matches.append(
+                (local_time, slot)
             )
 
-            formatted = london_time.strftime(
-                "%I:%M %p"
-            ).lstrip("0")
-
-            times.append(formatted)
-
-        except (ValueError, TypeError):
-            continue
-
-    # Remove duplicates while preserving order
-    times = list(dict.fromkeys(times))
-
-    # --------------------------------------------------------
-    # TIME DISPLAY
-    # --------------------------------------------------------
-
-    if times:
-
-        print(
-            f"    {WHITE}🕐  "
-            f"{'   •   '.join(times)}{RESET}"
-        )
-
-    # --------------------------------------------------------
-    # PRICE
-    # --------------------------------------------------------
-
-    prices = {
-        spot.get("price")
-        for spot in available
-        if spot.get("price") is not None
-    }
-
-    if prices:
-
-        price = next(iter(prices))
-
-        try:
-            price = f"£{float(price):.2f}"
-        except (ValueError, TypeError):
-            price = f"£{price}"
-
-        print(
-            f"    {GREEN}💷  {price}{RESET}"
-        )
-
-    # --------------------------------------------------------
-    # SLOT COUNT
-    # --------------------------------------------------------
-
-    print(
-        f"    {DIM}{len(available)} "
-        f"{'slot' if len(available) == 1 else 'slots'} available{RESET}"
+    unique_matches.sort(
+        key=lambda x: x[0]
     )
 
-    print()
+    return unique_matches
 
 
 # ============================================================
-# SUMMARY
+# SCAN BUTTON
 # ============================================================
 
-print(f"{GRAY}{line()}{RESET}")
-print(
-    f"{BOLD}{WHITE}  SCAN SUMMARY{RESET}"
-)
-print(f"{GRAY}{line()}{RESET}")
-print()
+st.subheader("🔍 Availability Scan")
 
-if available_days:
+if st.button(
+    "Scan Availability",
+    type="primary",
+    use_container_width=True,
+):
 
-    print(
-        f"  {GREEN}●{RESET} "
-        f"{BOLD}{available_days}{RESET} "
-        f"{'day' if available_days == 1 else 'days'} "
-        f"with availability"
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    with st.spinner(
+        f"Scanning the next {SCAN_DAYS} days..."
+    ):
+
+        days, failed_blocks = scan_availability(
+            progress_bar,
+            status_text,
+        )
+
+    unique_days = remove_duplicate_days(days)
+
+    st.session_state.days = unique_days
+    st.session_state.failed_blocks = failed_blocks
+    st.session_state.scanned = True
+
+    progress_bar.progress(1.0)
+
+    status_text.success(
+        f"Scan complete. Found {len(unique_days)} dates."
     )
 
-    print(
-        f"  {GREEN}●{RESET} "
-        f"{BOLD}{total_slots}{RESET} "
-        f"total available slots"
+
+# ============================================================
+# RESULTS
+# ============================================================
+
+if st.session_state.scanned:
+
+    unique_days = st.session_state.days
+
+    failed_blocks = (
+        st.session_state.failed_blocks
     )
 
-else:
+    # --------------------------------------------------------
+    # CALCULATE SUMMARY
+    # --------------------------------------------------------
 
-    print(
-        f"  {YELLOW}●  No available slots found "
-        f"within the scan period.{RESET}"
+    available_days = 0
+    total_slots = 0
+
+    for date_str in sorted(unique_days):
+
+        day = unique_days[date_str]
+
+        available = get_available_slots(day)
+
+        if available:
+            available_days += 1
+            total_slots += len(available)
+
+    # --------------------------------------------------------
+    # SUMMARY
+    # --------------------------------------------------------
+
+    st.divider()
+
+    st.subheader("📊 Scan Summary")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric(
+            "Days with availability",
+            available_days,
+        )
+
+    with col2:
+        st.metric(
+            "Available slots",
+            total_slots,
+        )
+
+    with col3:
+        st.metric(
+            "Failed blocks",
+            failed_blocks,
+        )
+
+    # --------------------------------------------------------
+    # SPECIFIC TIME SEARCH
+    # --------------------------------------------------------
+
+    st.divider()
+
+    st.subheader("🕐 Check a Specific Time")
+
+    time_col, button_col = st.columns(
+        [3, 1]
     )
 
-if failed_blocks:
+    with time_col:
 
-    print(
-        f"  {YELLOW}⚠  {failed_blocks} scan "
-        f"{'block' if failed_blocks == 1 else 'blocks'} "
-        f"failed.{RESET}"
+        selected_time = st.time_input(
+            "Choose a time",
+            value=time(6, 0),
+            step=timedelta(minutes=30),
+        )
+
+    with button_col:
+
+        st.write("")
+
+        check_clicked = st.button(
+            "🔎 Check Time",
+            use_container_width=True,
+        )
+
+    if check_clicked:
+
+        matches = find_slots_at_time(
+            unique_days,
+            selected_time,
+        )
+
+        st.session_state.time_matches = matches
+
+    # --------------------------------------------------------
+    # TIME SEARCH RESULTS
+    # --------------------------------------------------------
+
+    if "time_matches" in st.session_state:
+
+        matches = st.session_state.time_matches
+
+        st.markdown(
+            f"### Time Search: "
+            f"{selected_time.strftime('%I:%M %p').lstrip('0')}"
+        )
+
+        if not matches:
+
+            st.warning(
+                "No availability found at this time."
+            )
+
+        else:
+
+            st.success(
+                f"Found {len(matches)} matching slot(s)."
+            )
+
+            for local_time, slot in matches:
+
+                date_text = local_time.strftime(
+                    "%A, %d %B %Y"
+                )
+
+                time_text = local_time.strftime(
+                    "%I:%M %p"
+                ).lstrip("0")
+
+                price = slot.get(
+                    "price",
+                    "N/A",
+                )
+
+                try:
+                    price_text = (
+                        f"£{float(price):.2f}"
+                    )
+                except (
+                    ValueError,
+                    TypeError,
+                ):
+                    price_text = f"£{price}"
+
+                st.markdown(
+                    f"""
+                    <div class="slot-card">
+                        <div class="date-title">
+                            📅 {date_text}
+                        </div>
+
+                        <div class="times">
+                            🕐 <strong>{time_text}</strong>
+                        </div>
+
+                        <div class="price">
+                            💷 {price_text}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+    # --------------------------------------------------------
+    # ALL AVAILABLE SLOTS
+    # --------------------------------------------------------
+
+    st.divider()
+
+    st.subheader("📅 Available Slots")
+
+    if not available_days:
+
+        st.info(
+            f"No available slots found within "
+            f"the next {SCAN_DAYS} days."
+        )
+
+    else:
+
+        for date_str in sorted(unique_days):
+
+            day = unique_days[date_str]
+
+            available = get_available_slots(day)
+
+            if not available:
+                continue
+
+            # Date
+            try:
+                date_obj = datetime.strptime(
+                    date_str,
+                    "%Y-%m-%d",
+                )
+
+                friendly_date = date_obj.strftime(
+                    "%A, %d %B %Y"
+                )
+
+            except ValueError:
+
+                friendly_date = date_str
+
+            # Times
+            times = []
+
+            for spot in available:
+
+                local_time = format_slot_time(
+                    spot.get("start_time")
+                )
+
+                if local_time is None:
+                    continue
+
+                formatted = local_time.strftime(
+                    "%I:%M %p"
+                ).lstrip("0")
+
+                times.append(formatted)
+
+            # Remove duplicates while preserving order
+            times = list(
+                dict.fromkeys(times)
+            )
+
+            # Prices
+            prices = {
+                spot.get("price")
+                for spot in available
+                if spot.get("price") is not None
+            }
+
+            price_text = None
+
+            if prices:
+
+                price = next(iter(prices))
+
+                try:
+                    price_text = (
+                        f"£{float(price):.2f}"
+                    )
+                except (
+                    ValueError,
+                    TypeError,
+                ):
+                    price_text = f"£{price}"
+
+            # Display card
+            st.markdown(
+                f"""
+                <div class="slot-card">
+
+                    <div class="date-title">
+                        📅 {friendly_date}
+                    </div>
+
+                    <div class="times">
+                        🕐
+                        {" • ".join(times)}
+                    </div>
+
+                    {
+                        f'<div class="price">💷 {price_text}</div>'
+                        if price_text
+                        else ""
+                    }
+
+                    <div style="opacity: 0.65; margin-top: 8px;">
+                        {len(available)}
+                        {"slot" if len(available) == 1 else "slots"}
+                        available
+                    </div>
+
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    # --------------------------------------------------------
+    # BOOKING
+    # --------------------------------------------------------
+
+    st.divider()
+
+    st.subheader("🔗 Booking")
+
+    st.link_button(
+        "Book at Fairchildes Paw Park",
+        BOOKING_URL,
+        use_container_width=True,
     )
-
-print()
-
-if available_days:
-
-    print(f"  {GREEN}{BOLD}🔗 BOOKING{RESET}")
-    print(f"  {CYAN}{BOOKING_URL}{RESET}")
-
-print()
-box_bottom()
-print()
+```
