@@ -669,4 +669,4 @@ if st.session_state.scanned:
         BOOKING_URL,
         use_container_width=True,
     )
-```
+
