@@ -1,6 +1,8 @@
 
 import streamlit as st
 import requests
+import time as time_module
+
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
 
@@ -37,65 +39,11 @@ st.set_page_config(
 
 
 # ============================================================
-# CUSTOM CSS
-# ============================================================
-
-st.markdown(
-    """
-    <style>
-        .main-title {
-            font-size: 2.2rem;
-            font-weight: 700;
-            margin-bottom: 0;
-        }
-
-        .subtitle {
-            font-size: 1.2rem;
-            opacity: 0.75;
-            margin-top: 0;
-        }
-
-        .slot-card {
-            padding: 18px;
-            border: 1px solid rgba(128, 128, 128, 0.25);
-            border-radius: 12px;
-            margin-bottom: 14px;
-        }
-
-        .date-title {
-            font-size: 1.15rem;
-            font-weight: 700;
-        }
-
-        .times {
-            font-size: 1rem;
-            margin-top: 8px;
-        }
-
-        .price {
-            font-size: 1rem;
-            font-weight: 600;
-            margin-top: 8px;
-        }
-
-        .summary-card {
-            padding: 18px;
-            border: 1px solid rgba(128, 128, 128, 0.25);
-            border-radius: 12px;
-            text-align: center;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
 # SESSION STATE
 # ============================================================
 
 if "days" not in st.session_state:
-    st.session_state.days = []
+    st.session_state.days = {}
 
 if "failed_blocks" not in st.session_state:
     st.session_state.failed_blocks = 0
@@ -103,37 +51,33 @@ if "failed_blocks" not in st.session_state:
 if "scanned" not in st.session_state:
     st.session_state.scanned = False
 
+if "time_matches" not in st.session_state:
+    st.session_state.time_matches = None
+
 
 # ============================================================
 # HEADER
 # ============================================================
 
-st.markdown(
-    '<div class="main-title">🐾 Fairchildes Paw Park</div>',
-    unsafe_allow_html=True,
-)
+st.title("🐾 Fairchildes Paw Park")
 
-st.markdown(
-    '<div class="subtitle">Availability Scanner</div>',
-    unsafe_allow_html=True,
-)
+st.subheader("Availability Scanner")
 
 st.write(
-    f"Scanning the next **{SCAN_DAYS} days** · "
-    f"Timezone: **{TIMEZONE}**"
+    f"Scanning the next **{SCAN_DAYS} days** "
+    f"using **{TIMEZONE}** timezone."
 )
 
 st.divider()
 
 
 # ============================================================
-# SCAN FUNCTION
+# SCAN AVAILABILITY
 # ============================================================
 
 def scan_availability(progress_bar, status_text):
     """
-    Scan the Appointo availability API in blocks and return
-    all days returned by the API.
+    Scan the Appointo availability API in 30-day blocks.
     """
 
     all_days = []
@@ -143,18 +87,20 @@ def scan_availability(progress_bar, status_text):
         SCAN_DAYS + BLOCK_SIZE - 1
     ) // BLOCK_SIZE
 
-    for block_number, i in enumerate(
+    london_tz = ZoneInfo(TIMEZONE)
+
+    for block_number, day_offset in enumerate(
         range(0, SCAN_DAYS, BLOCK_SIZE),
         start=1,
     ):
 
-        start = datetime.now(
-            ZoneInfo(TIMEZONE)
-        ) + timedelta(days=i)
+        now = datetime.now(london_tz)
 
-        end = datetime.now(
-            ZoneInfo(TIMEZONE)
-        ) + timedelta(days=i + BLOCK_SIZE)
+        start = now + timedelta(days=day_offset)
+
+        end = now + timedelta(
+            days=day_offset + BLOCK_SIZE
+        )
 
         start_date = start.strftime("%Y-%m-%d")
         end_date = end.strftime("%Y-%m-%d")
@@ -172,11 +118,12 @@ def scan_availability(progress_bar, status_text):
         progress_bar.progress(progress)
 
         status_text.write(
-            f"Scanning block **{block_number}/{total_blocks}**  "
-            f"({start_date} → {end_date})"
+            f"Scanning block **{block_number}/{total_blocks}** "
+            f"· {start_date} → {end_date}"
         )
 
         try:
+
             response = requests.get(
                 API_URL,
                 params=params,
@@ -194,25 +141,37 @@ def scan_availability(progress_bar, status_text):
                 .get("days", [])
             )
 
-            all_days.extend(days)
+            if isinstance(days, list):
+                all_days.extend(days)
 
-        except requests.RequestException:
+        except requests.RequestException as error:
+
             failed_blocks += 1
 
-        # Small delay to avoid hammering the API
-        import time as time_module
+            st.warning(
+                f"Block {block_number} failed: {error}"
+            )
+
+        except ValueError:
+
+            failed_blocks += 1
+
+            st.warning(
+                f"Block {block_number} returned invalid JSON."
+            )
+
         time_module.sleep(0.05)
 
     return all_days, failed_blocks
 
 
 # ============================================================
-# REMOVE DUPLICATES
+# REMOVE DUPLICATE DAYS
 # ============================================================
 
 def remove_duplicate_days(days):
     """
-    Remove duplicate dates returned by the API.
+    Keep one entry per date.
     """
 
     unique_days = {}
@@ -236,7 +195,7 @@ def remove_duplicate_days(days):
 
 def get_available_slots(day):
     """
-    Return only slots that are actually available.
+    Return only genuinely available slots.
     """
 
     if not isinstance(day, dict):
@@ -244,23 +203,34 @@ def get_available_slots(day):
 
     spots = day.get("spots", [])
 
-    return [
-        spot
-        for spot in spots
-        if isinstance(spot, dict)
-        and spot.get("status") == "available"
-        and spot.get("is_available") is True
-    ]
+    if not isinstance(spots, list):
+        return []
+
+    available = []
+
+    for spot in spots:
+
+        if not isinstance(spot, dict):
+            continue
+
+        if spot.get("status") != "available":
+            continue
+
+        if spot.get("is_available") is not True:
+            continue
+
+        available.append(spot)
+
+    return available
 
 
 # ============================================================
-# FORMAT TIME
+# CONVERT API TIME TO LONDON TIME
 # ============================================================
 
 def format_slot_time(start_time):
     """
-    Convert API start_time into London time and display it
-    as 6:00 AM / 6:30 PM etc.
+    Convert the API's start_time into Europe/London time.
     """
 
     if not start_time:
@@ -268,7 +238,6 @@ def format_slot_time(start_time):
 
     try:
 
-        # Handle both ISO strings with and without Z
         dt = datetime.fromisoformat(
             start_time.replace("Z", "+00:00")
         )
@@ -279,39 +248,61 @@ def format_slot_time(start_time):
 
         return london_time
 
-    except (ValueError, TypeError):
+    except (
+        ValueError,
+        TypeError,
+    ):
+
         return None
 
 
 # ============================================================
-# FIND SLOTS AT SPECIFIC TIME
+# FIND SPECIFIC TIME
 # ============================================================
 
-def find_slots_at_time(unique_days, selected_time):
+def find_slots_at_time(
+    unique_days,
+    selected_time,
+):
     """
-    Find available slots matching the selected London time.
+    Find all available slots matching the selected
+    London time.
     """
+
+    target_time = selected_time.strftime(
+        "%H:%M"
+    )
 
     matches = []
 
-    target_time = selected_time.strftime("%H:%M")
-
     for day in unique_days.values():
 
-        slots = get_available_slots(day)
+        available_slots = get_available_slots(
+            day
+        )
 
-        for slot in slots:
+        for slot in available_slots:
 
-            start_time = slot.get("start_time")
+            start_time = slot.get(
+                "start_time"
+            )
 
-            local_time = format_slot_time(start_time)
+            local_time = format_slot_time(
+                start_time
+            )
 
             if local_time is None:
                 continue
 
-            if local_time.strftime("%H:%M") == target_time:
+            if local_time.strftime(
+                "%H:%M"
+            ) == target_time:
+
                 matches.append(
-                    (local_time, slot)
+                    (
+                        local_time,
+                        slot,
+                    )
                 )
 
     # Remove duplicate slots
@@ -322,19 +313,47 @@ def find_slots_at_time(unique_days, selected_time):
 
         key = local_time.isoformat()
 
-        if key not in seen:
+        if key in seen:
+            continue
 
-            seen.add(key)
+        seen.add(key)
 
-            unique_matches.append(
-                (local_time, slot)
+        unique_matches.append(
+            (
+                local_time,
+                slot,
             )
+        )
 
     unique_matches.sort(
-        key=lambda x: x[0]
+        key=lambda item: item[0]
     )
 
     return unique_matches
+
+
+# ============================================================
+# FORMAT PRICE
+# ============================================================
+
+def format_price(price):
+    """
+    Format a price as £12.00 where possible.
+    """
+
+    if price is None:
+        return None
+
+    try:
+
+        return f"£{float(price):.2f}"
+
+    except (
+        ValueError,
+        TypeError,
+    ):
+
+        return f"£{price}"
 
 
 # ============================================================
@@ -344,12 +363,13 @@ def find_slots_at_time(unique_days, selected_time):
 st.subheader("🔍 Availability Scan")
 
 if st.button(
-    "Scan Availability",
+    "🔍 Scan Availability",
     type="primary",
     use_container_width=True,
 ):
 
     progress_bar = st.progress(0)
+
     status_text = st.empty()
 
     with st.spinner(
@@ -361,16 +381,25 @@ if st.button(
             status_text,
         )
 
-    unique_days = remove_duplicate_days(days)
+    unique_days = remove_duplicate_days(
+        days
+    )
 
     st.session_state.days = unique_days
-    st.session_state.failed_blocks = failed_blocks
+
+    st.session_state.failed_blocks = (
+        failed_blocks
+    )
+
     st.session_state.scanned = True
+
+    st.session_state.time_matches = None
 
     progress_bar.progress(1.0)
 
     status_text.success(
-        f"Scan complete. Found {len(unique_days)} dates."
+        f"✓ Scan complete. "
+        f"Found {len(unique_days)} dates."
     )
 
 
@@ -386,26 +415,34 @@ if st.session_state.scanned:
         st.session_state.failed_blocks
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # CALCULATE SUMMARY
-    # --------------------------------------------------------
+    # ========================================================
 
     available_days = 0
     total_slots = 0
 
-    for date_str in sorted(unique_days):
+    for date_str in sorted(
+        unique_days
+    ):
 
         day = unique_days[date_str]
 
-        available = get_available_slots(day)
+        available = get_available_slots(
+            day
+        )
 
         if available:
-            available_days += 1
-            total_slots += len(available)
 
-    # --------------------------------------------------------
+            available_days += 1
+
+            total_slots += len(
+                available
+            )
+
+    # ========================================================
     # SUMMARY
-    # --------------------------------------------------------
+    # ========================================================
 
     st.divider()
 
@@ -414,30 +451,35 @@ if st.session_state.scanned:
     col1, col2, col3 = st.columns(3)
 
     with col1:
+
         st.metric(
             "Days with availability",
             available_days,
         )
 
     with col2:
+
         st.metric(
             "Available slots",
             total_slots,
         )
 
     with col3:
+
         st.metric(
             "Failed blocks",
             failed_blocks,
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # SPECIFIC TIME SEARCH
-    # --------------------------------------------------------
+    # ========================================================
 
     st.divider()
 
-    st.subheader("🕐 Check a Specific Time")
+    st.subheader(
+        "🕐 Check a Specific Time"
+    )
 
     time_col, button_col = st.columns(
         [3, 1]
@@ -448,7 +490,9 @@ if st.session_state.scanned:
         selected_time = st.time_input(
             "Choose a time",
             value=time(6, 0),
-            step=timedelta(minutes=30),
+            step=timedelta(
+                minutes=30
+            ),
         )
 
     with button_col:
@@ -462,210 +506,245 @@ if st.session_state.scanned:
 
     if check_clicked:
 
-        matches = find_slots_at_time(
-            unique_days,
-            selected_time,
+        st.session_state.time_matches = (
+            find_slots_at_time(
+                unique_days,
+                selected_time,
+            )
         )
 
-        st.session_state.time_matches = matches
-
-    # --------------------------------------------------------
+    # ========================================================
     # TIME SEARCH RESULTS
-    # --------------------------------------------------------
+    # ========================================================
 
-    if "time_matches" in st.session_state:
+    if (
+        st.session_state.time_matches
+        is not None
+    ):
 
-        matches = st.session_state.time_matches
+        matches = (
+            st.session_state.time_matches
+        )
+
+        formatted_search_time = (
+            selected_time
+            .strftime("%I:%M %p")
+            .lstrip("0")
+        )
 
         st.markdown(
-            f"### Time Search: "
-            f"{selected_time.strftime('%I:%M %p').lstrip('0')}"
+            f"### 🔎 Time Search: "
+            f"{formatted_search_time}"
         )
 
         if not matches:
 
             st.warning(
-                "No availability found at this time."
+                f"No availability found at "
+                f"{formatted_search_time}."
             )
 
         else:
 
             st.success(
-                f"Found {len(matches)} matching slot(s)."
+                f"Found {len(matches)} "
+                f"matching slot(s)."
             )
 
             for local_time, slot in matches:
 
-                date_text = local_time.strftime(
-                    "%A, %d %B %Y"
-                )
-
-                time_text = local_time.strftime(
-                    "%I:%M %p"
-                ).lstrip("0")
-
-                price = slot.get(
-                    "price",
-                    "N/A",
-                )
-
-                try:
-                    price_text = (
-                        f"£{float(price):.2f}"
+                date_text = (
+                    local_time
+                    .strftime(
+                        "%A, %d %B %Y"
                     )
-                except (
-                    ValueError,
-                    TypeError,
-                ):
-                    price_text = f"£{price}"
-
-                st.markdown(
-                    f"""
-                    <div class="slot-card">
-                        <div class="date-title">
-                            📅 {date_text}
-                        </div>
-
-                        <div class="times">
-                            🕐 <strong>{time_text}</strong>
-                        </div>
-
-                        <div class="price">
-                            💷 {price_text}
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
                 )
 
-    # --------------------------------------------------------
+                time_text = (
+                    local_time
+                    .strftime("%I:%M %p")
+                    .lstrip("0")
+                )
+
+                price_text = format_price(
+                    slot.get("price")
+                )
+
+                with st.container(
+                    border=True
+                ):
+
+                    st.markdown(
+                        f"### 📅 {date_text}"
+                    )
+
+                    st.write(
+                        f"🕐 **{time_text}**"
+                    )
+
+                    if price_text:
+
+                        st.write(
+                            f"💷 **{price_text}**"
+                        )
+
+    # ========================================================
     # ALL AVAILABLE SLOTS
-    # --------------------------------------------------------
+    # ========================================================
 
     st.divider()
 
-    st.subheader("📅 Available Slots")
+    st.subheader(
+        "📅 Available Slots"
+    )
 
     if not available_days:
 
         st.info(
-            f"No available slots found within "
-            f"the next {SCAN_DAYS} days."
+            f"No available slots found "
+            f"within the next {SCAN_DAYS} days."
         )
 
     else:
 
-        for date_str in sorted(unique_days):
+        for date_str in sorted(
+            unique_days
+        ):
 
             day = unique_days[date_str]
 
-            available = get_available_slots(day)
+            available = get_available_slots(
+                day
+            )
 
             if not available:
                 continue
 
-            # Date
+            # ------------------------------------------------
+            # DATE
+            # ------------------------------------------------
+
             try:
+
                 date_obj = datetime.strptime(
                     date_str,
                     "%Y-%m-%d",
                 )
 
-                friendly_date = date_obj.strftime(
-                    "%A, %d %B %Y"
+                friendly_date = (
+                    date_obj.strftime(
+                        "%A, %d %B %Y"
+                    )
                 )
 
             except ValueError:
 
                 friendly_date = date_str
 
-            # Times
+            # ------------------------------------------------
+            # TIMES
+            # ------------------------------------------------
+
             times = []
 
             for spot in available:
 
-                local_time = format_slot_time(
-                    spot.get("start_time")
+                local_time = (
+                    format_slot_time(
+                        spot.get(
+                            "start_time"
+                        )
+                    )
                 )
 
                 if local_time is None:
                     continue
 
-                formatted = local_time.strftime(
-                    "%I:%M %p"
-                ).lstrip("0")
+                formatted = (
+                    local_time
+                    .strftime("%I:%M %p")
+                    .lstrip("0")
+                )
 
-                times.append(formatted)
+                times.append(
+                    formatted
+                )
 
-            # Remove duplicates while preserving order
+            # Remove duplicate times
             times = list(
                 dict.fromkeys(times)
             )
 
-            # Prices
+            # ------------------------------------------------
+            # PRICES
+            # ------------------------------------------------
+
             prices = {
                 spot.get("price")
                 for spot in available
-                if spot.get("price") is not None
+                if spot.get("price")
+                is not None
             }
 
             price_text = None
 
             if prices:
 
-                price = next(iter(prices))
+                price = next(
+                    iter(prices)
+                )
 
-                try:
-                    price_text = (
-                        f"£{float(price):.2f}"
+                price_text = format_price(
+                    price
+                )
+
+            # ------------------------------------------------
+            # DISPLAY CARD
+            # ------------------------------------------------
+
+            with st.container(
+                border=True
+            ):
+
+                st.markdown(
+                    f"### 📅 {friendly_date}"
+                )
+
+                if times:
+
+                    st.write(
+                        "🕐 **"
+                        + "   •   ".join(times)
+                        + "**"
                     )
-                except (
-                    ValueError,
-                    TypeError,
-                ):
-                    price_text = f"£{price}"
 
-            # Display card
-            st.markdown(
-                f"""
-                <div class="slot-card">
+                if price_text:
 
-                    <div class="date-title">
-                        📅 {friendly_date}
-                    </div>
+                    st.write(
+                        f"💷 **{price_text}**"
+                    )
 
-                    <div class="times">
-                        🕐
-                        {" • ".join(times)}
-                    </div>
+                slot_word = (
+                    "slot"
+                    if len(available) == 1
+                    else "slots"
+                )
 
-                    {
-                        f'<div class="price">💷 {price_text}</div>'
-                        if price_text
-                        else ""
-                    }
+                st.caption(
+                    f"{len(available)} "
+                    f"{slot_word} available"
+                )
 
-                    <div style="opacity: 0.65; margin-top: 8px;">
-                        {len(available)}
-                        {"slot" if len(available) == 1 else "slots"}
-                        available
-                    </div>
-
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-    # --------------------------------------------------------
+    # ========================================================
     # BOOKING
-    # --------------------------------------------------------
+    # ========================================================
 
     st.divider()
 
     st.subheader("🔗 Booking")
 
     st.link_button(
-        "Book at Fairchildes Paw Park",
+        "🐾 Book at Fairchildes Paw Park",
         BOOKING_URL,
         use_container_width=True,
     )
