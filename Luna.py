@@ -1,4 +1,3 @@
-
 import streamlit as st
 import requests
 import time as time_module
@@ -25,6 +24,7 @@ HEADERS = {
 
 SCAN_DAYS = 180
 BLOCK_SIZE = 30
+APP_PASSWORD = "r00t"
 
 
 # ============================================================
@@ -36,6 +36,31 @@ st.set_page_config(
     page_icon="🐾",
     layout="wide",
 )
+
+
+# ============================================================
+# AUTHENTICATION GATE
+# ============================================================
+
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+def check_password():
+    if st.session_state.get("password_input") == APP_PASSWORD:
+        st.session_state.authenticated = True
+        del st.session_state["password_input"]  # Clear from memory
+    else:
+        st.error("Incorrect password")
+
+if not st.session_state.authenticated:
+    st.title("🐾 Fairchildes Paw Park")
+    st.text_input(
+        "Enter Password to Access",
+        type="password",
+        on_change=check_password,
+        key="password_input",
+    )
+    st.stop()
 
 
 # ============================================================
@@ -748,4 +773,3 @@ if st.session_state.scanned:
         BOOKING_URL,
         use_container_width=True,
     )
-
