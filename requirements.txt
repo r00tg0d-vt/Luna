@@ -1,4 +1,3 @@
 streamlit
 requests
-selenium
-webdriver-manager
+playwright
